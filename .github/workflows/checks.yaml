@@ -100,6 +100,11 @@ jobs:
         # Not a required check in the branch ruleset, since PRs don't run it.
         if: github.event_name != 'pull_request'
         runs-on: macos-latest
+        # When GitHub has no macOS runner free, the job is dropped after a long
+        # queue. That says nothing about nomod, so it must not turn main red:
+        # look at this job's own result, and re-run it if it never started.
+        continue-on-error: true
+        timeout-minutes: 10
         steps:
             - uses: actions/checkout@v7
             - uses: actions/setup-node@v7
