@@ -75,12 +75,12 @@ jobs:
         needs: [lint]
         # Run even if lint fails, but not when the run is cancelled.
         if: ${{ !cancelled() }}
-        # nomod walks file systems and deletes folders: test it on each OS and
-        # on every Node version package.json "engines" allows.
+        # nomod walks file systems and deletes folders: test it on Linux and
+        # Windows with every Node version package.json "engines" allows.
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, windows-latest, macos-latest]
+                os: [ubuntu-latest, windows-latest]
                 node: [22, 24, 26]
         runs-on: ${{ matrix.os }}
         steps:
@@ -89,6 +89,22 @@ jobs:
               with:
                   node-version: ${{ matrix.node }}
             # No npm ci: the tests use node:test only, and nomod has no dependencies.
+            - run: node --check nomod.js
+            - run: npm test
+
+    unit_tests_macos:
+        # macOS once, after a merge to main (and on demand), not on pull requests:
+        # GitHub's macOS runners can queue for 15 minutes or more, and Linux
+        # covers the rest of POSIX. It checks what is macOS's own: ~/Library is
+        # skipped, paths are compared case-sensitively, the temp folder is a link.
+        # Not a required check in the branch ruleset, since PRs don't run it.
+        if: github.event_name != 'pull_request'
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 26
             - run: node --check nomod.js
             - run: npm test
 
