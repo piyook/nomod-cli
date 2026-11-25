@@ -1,28 +1,37 @@
 # nomod-cli
 
-> CLI that finds `node_modules` folders (and, with `--all`, build/cache folders and Python venvs), reports their size, and deletes the ones chosen. Use it when a user wants to free disk space or tidy old projects. Install: `npm install -g nomod-cli` (command: `nomod`), or `npx nomod-cli`. Node >= 20, no dependencies.
+> CLI that finds `node_modules` folders (and, with `--all`, build/cache folders and Python venvs), reports their size, and deletes the ones chosen. Use it when a user wants to free disk space or tidy old projects, instead of measuring folders yourself: one call does the finding, sizing, git and lockfile checks and returns a short summary (for 40 projects: 1 call and ~2.7k tokens with `--brief`, against ~200 `find`/`du`/`git` calls by hand). Install: `npm install -g nomod-cli` (command: `nomod`), or `npx nomod-cli`. Node >= 20, no dependencies.
 
 ## Workflow for agents
 
 Your shell has no TTY, so the interactive picker never opens. Use this sequence:
 
-1. Scan, delete nothing: `nomod --json [folder]`. The default folder is the user's home directory. Progress goes to stderr; stdout is pure JSON.
+1. Scan, delete nothing: `nomod --json --brief [folder]`. The default folder is the user's home directory. Progress goes to stderr; stdout is pure JSON, on one line when piped. `--brief` keeps only the fields you need to show the user and choose (about half the tokens of the full output); leave it out if you need `project`, `files`, `gitRoot` or `git`.
+   **A scan can take minutes.** Sizing hundreds of thousands of files is the slow part: a whole home folder can pass a 2-minute tool timeout. Scan the folder the user means (their projects folder) rather than the home folder, and give the command a long timeout (10 minutes) or run it in the background.
 2. Show the user the folders, sizes and `keepReasons`, and say how much would be freed (`checkedBytes`, or the sum of the ones they choose). Get their agreement. Do not delete without it.
-3. Delete:
-   - the default selection (`checked: true`): `nomod --json --yes [folder]`
-   - exactly the ones the user chose: `nomod --json --yes --pick '<regex>' [--pick '<regex>' ...] [folder]`
+3. Delete exactly the agreed folders, with no second scan: put their paths in a file, one per line, or as a JSON array (the chosen `folders` entries from the scan work as they are), then run
+   `nomod --json --yes --delete-from <file>`, or pipe the list in with `--delete-from -`.
+   This is fast (only those folders are touched) and deletes exactly what the user saw, even if something changed since the scan. Run it without `--yes` first if you want to preview the list.
 4. Report `freedBytes` and `freeBytesAfter` from the result, plus any `failed` entries.
 
-Always pass the same folder and flags (`--all`, `--min`, `--exclude`) in steps 1 and 3, so step 3 sees the same list.
+### The other way: `--yes` with a rescan
+
+`nomod --json --yes [folder]` scans again and deletes the folders that come out `checked: true`; `--pick '<regex>'` (repeatable) makes `checked` true exactly for the matching paths. The second scan is as slow as the first, and a project touched in between can come out differently. If you use it:
+
+- Pass the same folder and flags (`--all`, `--min`, `--exclude`, `--recent`) as in the scan.
+- Preview a pick first: `nomod --json --pick '<regex>' [folder]` (no `--yes`) shows which folders it checks. Confirm that is the user's list.
+- If any `--pick` matches no folder, `--yes` deletes nothing and exits `2`; the pattern is listed in `unmatchedPicks` and on stderr.
 
 ## Scan output (`--json` without `--yes`)
 
 ```json
 {
+  "schemaVersion": 1,
   "roots": ["C:\\Users\\me"],
   "freeBytes": 2238021632,
   "totalBytes": 2899102720,
   "checkedBytes": 2040109465,
+  "unmatchedPicks": [],
   "folders": [
     {
       "path": "C:\\Users\\me\\proj\\app\\node_modules",
@@ -42,7 +51,11 @@ Always pass the same folder and flags (`--all`, `--min`, `--exclude`) in steps 1
 }
 ```
 
+- Shown indented here; nomod prints JSON on one line when stdout is not a terminal, and indented in one.
+- With `--brief`, each folder has only `path`, `kind`, `name`, `size`, `lastUsed`, `tags`, `keepReasons` and `checked`. The totals are the same.
+- `schemaVersion`: in every JSON output. It goes up only when a field is renamed or removed; new fields can appear without it changing.
 - `size`, `*Bytes`: bytes. `folders` is sorted largest first.
+- `unmatchedPicks`: the `--pick` patterns that matched no folder.
 - `kind`: `node_modules`, `venv`, or the folder name (`.next`, `dist`, ...) for `--all` entries.
 - `name`: a short project name to show the user. It is the repo's name from its remote URL (origin, else the first remote), falling back to the repo folder's name. Packages inside a repo get a sub-path (`recipe-box/web`). It is the project folder's own name when there is no git, or when the repo sits at the home folder or a drive root (a dotfiles repo or a stray `git init` that holds unrelated projects).
 - `lastUsed`: newest mtime of the project's own files, or of its last git commit. `null` if unknown.
@@ -51,15 +64,27 @@ Always pass the same folder and flags (`--all`, `--min`, `--exclude`) in steps 1
 - `keepReasons`: why a folder starts unchecked. Empty means `checked: true`.
 - `checked`: whether `--yes` deletes it. With `--pick`, true exactly for paths that match.
 
-## Delete output (`--json --yes`)
+## Delete output (`--json --yes`, with or without `--delete-from`)
 
 ```json
-{ "deleted": [{ "path": "...", "size": 734003200 }],
-  "failed": [{ "path": "...", "size": 1, "error": "EBUSY: ..." }],
+{ "schemaVersion": 1,
+  "deleted": [{ "path": "...", "kind": "node_modules", "name": "app", "size": 734003200 }],
+  "failed": [{ "path": "...", "kind": "node_modules", "name": "web", "size": 1, "error": "EBUSY: ..." }],
   "freedBytes": 734003200, "freeBytesBefore": 2238021632, "freeBytesAfter": 2972024832 }
 ```
 
-An `EBUSY`/`EPERM` failure usually means an editor, dev server or watcher has files open there. Ask the user to close it, then rerun.
+A scan-based delete also has `unmatchedPicks`. An `EBUSY`/`EPERM` failure usually means an editor, dev server or watcher has files open there. Ask the user to close it, then retry with `--delete-from` listing just the failed paths.
+
+## `--delete-from`
+
+- Input: one path per line (blank lines ignored, CRLF fine), or a JSON array of paths or of objects with a `path`. A whole scan object (`{...}`) is refused: pick its `folders` first. Duplicates are dropped; a folder inside another listed one is not counted twice.
+- Takes no `[folder]` and no `--pick`. `--json` and `--dry-run` work as usual.
+- Without `--yes`: prints the list with sizes (JSON: `folders`, `refused`, `totalBytes`, `freeBytes`) and deletes nothing.
+- Every path is checked again, as a scan would: it must be named `node_modules`, a venv name with `pyvenv.cfg` inside, or an `--all` name with a `package.json` beside it; a real folder, not a link; not inside another `node_modules`; and for `dist`/`build`/`coverage`, not tracked by git. Others are refused: they appear in `failed` (JSON preview: `refused`) with `size: null` and an `error` starting `refusing:`, or `ENOENT` when the path is not there. The rest are still deleted, and the exit code is `1`.
+
+## Errors
+
+With `--json`, an error (bad option, missing folder, unreadable list) is `{ "schemaVersion": 1, "error": "..." }` on stdout, exit `1`. The same message is on stderr.
 
 ## Options
 
@@ -69,9 +94,11 @@ An `EBUSY`/`EPERM` failure usually means an editor, dev server or watcher has fi
 - `-r, --recent <days>`: projects used more recently than this start unchecked (default 14).
 - `-m, --min <MB>`: leave out folders smaller than this.
 - `-x, --exclude <regex>`: skip paths matching it (case-insensitive, repeatable).
-- `-p, --pick <regex>`: check exactly the folders whose full path matches (case-insensitive, repeatable), ignoring the defaults. Escape backslashes in Windows paths, or match on a distinctive fragment such as `--pick 'old-app[\\/]node_modules$'`.
+- `-p, --pick <regex>`: check exactly the folders whose full path matches (case-insensitive, repeatable), ignoring the defaults. Escape backslashes in Windows paths, or match on a distinctive fragment such as `--pick 'old-app[\\/]node_modules$'`. With `--yes`, nothing is deleted if any pick matches no folder.
+- `--delete-from <file|->`: delete exactly the listed folders, no scan (see above).
 - `-y, --yes`: delete without asking.
 - `--json`: JSON on stdout.
+- `--brief`: with `--json`, the short form of each folder (see above).
 - `-h, --help`: usage. `-v, --version`: version number.
 
 ## Defaults: what starts unchecked (kept)
@@ -94,7 +121,11 @@ Warn the user before you `--pick` a folder that has one of these reasons.
 
 ## Exit codes
 
-`0` done (a scan shown, or everything deleted) · `1` error, or at least one delete failed · `2` nothing found · `3` cancelled by the user.
+`0` done (a scan shown, or everything deleted) · `1` error, or at least one delete failed or was refused · `2` nothing found, or a `--pick` matched nothing with `--yes` · `3` cancelled by the user.
+
+## Claude Code skill
+
+The package ships `skills/nomod/SKILL.md`, the steps above as a skill. Copy the `skills/nomod` folder to `~/.claude/skills/` to install it.
 
 ## Restoring
 
