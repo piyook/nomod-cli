@@ -5,7 +5,7 @@ Free disk space by deleting the `node_modules` folders you don't need. Use it yo
 - **By hand:** a checklist of every `node_modules` on your machine, biggest first, with what's safe to delete already ticked.
 - **For agents:** one command does the work an agent would otherwise piece together from hundreds of `find`, `du` and `git` calls, and hands back a short JSON summary. That saves tool calls and tokens. Ask your agent to "free up some disk space" and it can scan, show you the list, and delete just what you agree to.
 
-No dependencies. Needs Node 20 or newer. Works on Windows, macOS and Linux.
+No dependencies. Needs Node 22 or newer. Works on Windows, macOS and Linux.
 
 ![nomod listing node_modules folders with their size, last use, git status and project name, and the free space you'd have after deleting the checked ones](docs/screenshot.svg)
 

@@ -1,6 +1,6 @@
 # nomod-cli
 
-> CLI that finds `node_modules` folders (and, with `--all`, build/cache folders and Python venvs), reports their size, and deletes the ones chosen. Use it when a user wants to free disk space or tidy old projects, instead of measuring folders yourself: one call does the finding, sizing, git and lockfile checks and returns a short summary (for 40 projects: 1 call and ~2.7k tokens with `--brief`, against ~200 `find`/`du`/`git` calls by hand). Install: `npm install -g nomod-cli` (command: `nomod`), or `npx nomod-cli`. Node >= 20, no dependencies.
+> CLI that finds `node_modules` folders (and, with `--all`, build/cache folders and Python venvs), reports their size, and deletes the ones chosen. Use it when a user wants to free disk space or tidy old projects, instead of measuring folders yourself: one call does the finding, sizing, git and lockfile checks and returns a short summary (for 40 projects: 1 call and ~2.7k tokens with `--brief`, against ~200 `find`/`du`/`git` calls by hand). Install: `npm install -g nomod-cli` (command: `nomod`), or `npx nomod-cli`. Node >= 22, no dependencies.
 
 ## Workflow for agents
 
