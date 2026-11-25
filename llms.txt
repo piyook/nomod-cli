@@ -1,0 +1,101 @@
+# nomod-cli
+
+> CLI that finds `node_modules` folders (and, with `--all`, build/cache folders and Python venvs), reports their size, and deletes the ones chosen. Use it when a user wants to free disk space or tidy old projects. Install: `npm install -g nomod-cli` (command: `nomod`), or `npx nomod-cli`. Node >= 20, no dependencies.
+
+## Workflow for agents
+
+Your shell has no TTY, so the interactive picker never opens. Use this sequence:
+
+1. Scan, delete nothing: `nomod --json [folder]`. The default folder is the user's home directory. Progress goes to stderr; stdout is pure JSON.
+2. Show the user the folders, sizes and `keepReasons`, and say how much would be freed (`checkedBytes`, or the sum of the ones they choose). Get their agreement. Do not delete without it.
+3. Delete:
+   - the default selection (`checked: true`): `nomod --json --yes [folder]`
+   - exactly the ones the user chose: `nomod --json --yes --pick '<regex>' [--pick '<regex>' ...] [folder]`
+4. Report `freedBytes` and `freeBytesAfter` from the result, plus any `failed` entries.
+
+Always pass the same folder and flags (`--all`, `--min`, `--exclude`) in steps 1 and 3, so step 3 sees the same list.
+
+## Scan output (`--json` without `--yes`)
+
+```json
+{
+  "roots": ["C:\\Users\\me"],
+  "freeBytes": 2238021632,
+  "totalBytes": 2899102720,
+  "checkedBytes": 2040109465,
+  "folders": [
+    {
+      "path": "C:\\Users\\me\\proj\\app\\node_modules",
+      "kind": "node_modules",
+      "name": "app",
+      "project": "C:\\Users\\me\\proj\\app",
+      "size": 734003200,
+      "files": 41233,
+      "lastUsed": "2026-04-02T10:11:12.000Z",
+      "gitRoot": "C:\\Users\\me\\proj\\app",
+      "git": "clean",
+      "tags": [],
+      "keepReasons": [],
+      "checked": true
+    }
+  ]
+}
+```
+
+- `size`, `*Bytes`: bytes. `folders` is sorted largest first.
+- `kind`: `node_modules`, `venv`, or the folder name (`.next`, `dist`, ...) for `--all` entries.
+- `name`: a short project name to show the user. It is the repo's name from its remote URL (origin, else the first remote), falling back to the repo folder's name. Packages inside a repo get a sub-path (`recipe-box/web`). It is the project folder's own name when there is no git, or when the repo sits at the home folder or a drive root (a dotfiles repo or a stray `git init` that holds unrelated projects).
+- `lastUsed`: newest mtime of the project's own files, or of its last git commit. `null` if unknown.
+- `git`: `clean`, `<n> dirty`, `no git` or `?`. For information only: `node_modules` is never committed, so a dirty repo is not a reason to keep it.
+- `tags`: `pnpm` (shares a store, so it frees less than `size`; `pnpm store prune` frees the rest), `no-lock`, `no-pkg`, `no-reqs`, `no-git`.
+- `keepReasons`: why a folder starts unchecked. Empty means `checked: true`.
+- `checked`: whether `--yes` deletes it. With `--pick`, true exactly for paths that match.
+
+## Delete output (`--json --yes`)
+
+```json
+{ "deleted": [{ "path": "...", "size": 734003200 }],
+  "failed": [{ "path": "...", "size": 1, "error": "EBUSY: ..." }],
+  "freedBytes": 734003200, "freeBytesBefore": 2238021632, "freeBytesAfter": 2972024832 }
+```
+
+An `EBUSY`/`EPERM` failure usually means an editor, dev server or watcher has files open there. Ask the user to close it, then rerun.
+
+## Options
+
+- `[folder ...]`: folders to scan (default: home directory).
+- `-n, --dry-run`: list only. It overrides `--yes`.
+- `-a, --all`: also `.next .nuxt .output .svelte-kit .turbo .parcel-cache .angular .docusaurus .cache dist build coverage` inside projects that have a `package.json`, and Python venvs (folders with `pyvenv.cfg`).
+- `-r, --recent <days>`: projects used more recently than this start unchecked (default 14).
+- `-m, --min <MB>`: leave out folders smaller than this.
+- `-x, --exclude <regex>`: skip paths matching it (case-insensitive, repeatable).
+- `-p, --pick <regex>`: check exactly the folders whose full path matches (case-insensitive, repeatable), ignoring the defaults. Escape backslashes in Windows paths, or match on a distinctive fragment such as `--pick 'old-app[\\/]node_modules$'`.
+- `-y, --yes`: delete without asking.
+- `--json`: JSON on stdout.
+- `-h, --help`: usage. `-v, --version`: version number.
+
+## Defaults: what starts unchecked (kept)
+
+- the project was used within `--recent` days
+- a `node_modules` with no lockfile in its folder or any parent up to the git root (a reinstall may resolve different versions)
+- a `node_modules` with no `package.json` beside it
+- `dist`/`build`/`coverage` in a project with no git
+- a venv with no requirements.txt / pyproject.toml / setup.py / Pipfile / lockfile
+
+Warn the user before you `--pick` a folder that has one of these reasons.
+
+## Safety guarantees
+
+- It only deletes folders named `node_modules`, one of the `--all` names, or a venv name (`.venv venv env .env` with `pyvenv.cfg`). Before deleting it checks again that each one is a real folder, not a link.
+- It never follows symlinks or junctions, either while scanning or while deleting.
+- It never scans `AppData`, dot-folders (`.vscode`, `.npm`, `.nvm`, ...), `Program Files`, `Windows`, `ProgramData` or `Library`, so editor extensions and global packages are never listed.
+- `dist`/`build`/`coverage` that git tracks are never listed.
+- With no TTY and no `--yes`, it prints a text report and deletes nothing.
+
+## Exit codes
+
+`0` done (a scan shown, or everything deleted) · `1` error, or at least one delete failed · `2` nothing found · `3` cancelled by the user.
+
+## Restoring
+
+Run `npm install` (or `pnpm install` / `yarn` / `bun install`) in the project folder. Python: recreate the venv and install from requirements/pyproject.
