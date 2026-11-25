@@ -76,12 +76,16 @@ jobs:
         # Run even if lint fails, but not when the run is cancelled.
         if: ${{ !cancelled() }}
         # nomod walks file systems and deletes folders: test it on each OS and
-        # on every Node version package.json "engines" allows.
+        # on every Node version package.json "engines" allows. macOS once only
+        # (its minutes cost 10x on a private repo, and it is the OS that matters).
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, windows-latest, macos-latest]
+                os: [ubuntu-latest, windows-latest]
                 node: [20, 22, 24, 26]
+                include:
+                    - os: macos-latest
+                      node: 26
         runs-on: ${{ matrix.os }}
         steps:
             - uses: actions/checkout@v7

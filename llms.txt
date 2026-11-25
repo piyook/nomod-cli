@@ -1,12 +1,12 @@
 # nomod-cli
 
-> CLI that finds `node_modules` folders (and, with `--all`, build/cache folders and Python venvs), reports their size, and deletes the ones chosen. Use it when a user wants to free disk space or tidy old projects. Install: `npm install -g nomod-cli` (command: `nomod`), or `npx nomod-cli`. Node >= 20, no dependencies.
+> CLI that finds `node_modules` folders (and, with `--all`, build/cache folders and Python venvs), reports their size, and deletes the ones chosen. Use it when a user wants to free disk space or tidy old projects, instead of measuring folders yourself: one call does the finding, sizing, git and lockfile checks and returns a short summary (for 40 projects: 1 call and ~2.7k tokens with `--brief`, against ~200 `find`/`du`/`git` calls by hand). Install: `npm install -g nomod-cli` (command: `nomod`), or `npx nomod-cli`. Node >= 20, no dependencies.
 
 ## Workflow for agents
 
 Your shell has no TTY, so the interactive picker never opens. Use this sequence:
 
-1. Scan, delete nothing: `nomod --json [folder]`. The default folder is the user's home directory. Progress goes to stderr; stdout is pure JSON.
+1. Scan, delete nothing: `nomod --json --brief [folder]`. The default folder is the user's home directory. Progress goes to stderr; stdout is pure JSON, on one line when piped. `--brief` keeps only the fields you need to show the user and choose (about half the tokens of the full output); leave it out if you need `project`, `files`, `gitRoot` or `git`.
    **A scan can take minutes.** Sizing hundreds of thousands of files is the slow part: a whole home folder can pass a 2-minute tool timeout. Scan the folder the user means (their projects folder) rather than the home folder, and give the command a long timeout (10 minutes) or run it in the background.
 2. Show the user the folders, sizes and `keepReasons`, and say how much would be freed (`checkedBytes`, or the sum of the ones they choose). Get their agreement. Do not delete without it.
 3. Delete exactly the agreed folders, with no second scan: put their paths in a file, one per line, or as a JSON array (the chosen `folders` entries from the scan work as they are), then run
@@ -51,6 +51,8 @@ Your shell has no TTY, so the interactive picker never opens. Use this sequence:
 }
 ```
 
+- Shown indented here; nomod prints JSON on one line when stdout is not a terminal, and indented in one.
+- With `--brief`, each folder has only `path`, `kind`, `name`, `size`, `lastUsed`, `tags`, `keepReasons` and `checked`. The totals are the same.
 - `schemaVersion`: in every JSON output. It goes up only when a field is renamed or removed; new fields can appear without it changing.
 - `size`, `*Bytes`: bytes. `folders` is sorted largest first.
 - `unmatchedPicks`: the `--pick` patterns that matched no folder.
@@ -96,6 +98,7 @@ With `--json`, an error (bad option, missing folder, unreadable list) is `{ "sch
 - `--delete-from <file|->`: delete exactly the listed folders, no scan (see above).
 - `-y, --yes`: delete without asking.
 - `--json`: JSON on stdout.
+- `--brief`: with `--json`, the short form of each folder (see above).
 - `-h, --help`: usage. `-v, --version`: version number.
 
 ## Defaults: what starts unchecked (kept)

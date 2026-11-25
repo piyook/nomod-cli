@@ -83,7 +83,10 @@ Options:
   -y, --yes           don't ask "are you sure" after the picker. Without a terminal
                       (piped / scripted, e.g. an agent), deletes what is checked
       --json          print JSON instead of text. Alone: the scan, nothing deleted.
-                      With --yes: deletes, then prints what was deleted
+                      With --yes: deletes, then prints what was deleted. One line
+                      when piped, indented in a terminal
+      --brief         with --json, only the fields needed to choose: path, kind,
+                      name, size, lastUsed, tags, keepReasons, checked
   -h, --help          show this help
   -v, --version       show the version
 
@@ -125,13 +128,14 @@ const OPTIONS = [
   { long: '--pick', short: '-p', takes: toRegExp, set: (o, v) => o.pick.push(v) },
   { long: '--yes', short: '-y', set: (o) => (o.yes = true) },
   { long: '--json', set: (o) => (o.json = true) },
+  { long: '--brief', set: (o) => (o.brief = true) },
   { long: '--delete-from', takes: (_, v) => v, set: (o, v) => (o.deleteFrom = v) },
   { long: '--help', short: '-h', set: () => printAndExit(HELP) },
   { long: '--version', short: '-v', set: () => printAndExit(VERSION) },
 ];
 
 function parseArgs(argv) {
-  const o = { roots: [], all: false, dryRun: false, recent: 14, min: 0, exclude: [], pick: [], yes: false, json: false, deleteFrom: null };
+  const o = { roots: [], all: false, dryRun: false, recent: 14, min: 0, exclude: [], pick: [], yes: false, json: false, brief: false, deleteFrom: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const opt = OPTIONS.find((x) => x.long === a || x.short === a);
@@ -157,8 +161,10 @@ const SCHEMA_VERSION = 1;
 // Known before the arguments are parsed, so that errors in them come out as JSON too.
 const JSON_MODE = process.argv.slice(2).includes('--json');
 
+// Indented for a person at a terminal; on one line when piped (an agent, a
+// script), where indentation only costs tokens.
 function printJson(obj) {
-  console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, ...obj }, null, 2));
+  console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, ...obj }, null, process.stdout.isTTY ? 2 : 0));
 }
 
 // With --json, errors are also a JSON object on stdout: { schemaVersion, error }.
@@ -1056,23 +1062,31 @@ function printScanJson(rows, opts, unmatchedPicks) {
     totalBytes: sum(rows),
     checkedBytes: sum(rows.filter((r) => r.checked)),
     unmatchedPicks,
-    folders: rows.map(({ path: p, kind, name, project, size, files, lastUsed: lu, gitRoot, git: g, tags, why, checked }) => ({
-      path: p,
-      kind,
-      name,
-      project,
-      size,
-      files,
-      lastUsed: lu && new Date(lu).toISOString(),
-      gitRoot,
-      git: g,
-      tags,
-      keepReasons: why,
-      checked,
-    })),
+    folders: rows.map((r) => (opts.brief ? briefFolder(r) : fullFolder(r))),
   });
   return rows.length ? 0 : 2;
 }
+
+// What an agent needs to show the user and choose: no repeated paths
+// (project, gitRoot), no file counts or git status.
+const briefFolder = (r) => ({
+  path: r.path,
+  kind: r.kind,
+  name: r.name,
+  size: r.size,
+  lastUsed: r.lastUsed && new Date(r.lastUsed).toISOString(),
+  tags: r.tags,
+  keepReasons: r.why,
+  checked: r.checked,
+});
+
+const fullFolder = (r) => ({
+  ...briefFolder(r),
+  project: r.project,
+  files: r.files,
+  gitRoot: r.gitRoot,
+  git: r.git,
+});
 
 // The picker (in a terminal), then "are you sure" (unless --yes), then delete.
 async function deleteChosen(rows, opts, interactive, unmatchedPicks) {

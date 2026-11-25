@@ -11,7 +11,7 @@ Never delete anything without the user's agreement to the exact list.
 
 ## Steps
 
-1. **Scan.** `nomod --json <folder>` prints JSON on stdout and deletes nothing. Scan the folder the user means (their projects folder, say), not the whole home folder, unless they ask: a home-folder scan can take several minutes, so give the command a long timeout (10 minutes) or run it in the background. Add `--all` only if the user wants build/cache folders and venvs too.
+1. **Scan.** `nomod --json --brief <folder>` prints a short JSON summary on stdout and deletes nothing. Don't measure folders yourself with `find`/`du`/`git`: this one call does it all. Scan the folder the user means (their projects folder, say), not the whole home folder, unless they ask: a home-folder scan can take several minutes, so give the command a long timeout (10 minutes) or run it in the background. Add `--all` only if the user wants build/cache folders and venvs too.
 2. **Show the user** a table of the folders: `name`, `kind`, size (`size` is bytes), `lastUsed`, and `keepReasons` for the ones that start unchecked. Say how much the checked ones free (`checkedBytes`) and what free space would become (`freeBytes` + that).
 3. **Agree on the list.** The default is the folders with `checked: true`. If the user picks others that have `keepReasons` (used recently, no lockfile, no package.json, not in git), say what the reason means before including them.
 4. **Delete exactly that list,** with no second scan: write the chosen paths to a file, one per line (or pass the chosen `folders` entries as a JSON array), then

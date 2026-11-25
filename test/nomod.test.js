@@ -106,6 +106,28 @@ describe('scan', () => {
     assert.equal(r.json.checkedBytes, locked.size);
   });
 
+  test('JSON is one line when piped', () => {
+    project('a');
+    const out = nomod(['--json', fx]).stdout;
+    assert.equal(out.trim().split('\n').length, 1);
+    assert.equal(JSON.parse(out).folders.length, 1);
+  });
+
+  test('--brief keeps only the fields needed to choose, and is smaller', () => {
+    project('a');
+    project('b', { lock: false });
+    const full = nomod(['--json', '--recent', '0', fx]);
+    const brief = nomod(['--json', '--brief', '--recent', '0', fx]);
+    assert.equal(brief.code, 0);
+    assert.deepEqual(Object.keys(brief.json.folders[0]).sort(), ['checked', 'keepReasons', 'kind', 'lastUsed', 'name', 'path', 'size', 'tags']);
+    assert.deepEqual(
+      brief.json.folders.map((f) => [f.name, f.checked]),
+      full.json.folders.map((f) => [f.name, f.checked]),
+    );
+    assert.equal(brief.json.checkedBytes, full.json.checkedBytes);
+    assert.ok(brief.stdout.length < full.stdout.length);
+  });
+
   test('recently used projects start unchecked', () => {
     project('fresh');
     const f = nomod(['--json', fx]).json.folders[0];

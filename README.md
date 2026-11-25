@@ -3,7 +3,7 @@
 Free disk space by deleting the `node_modules` folders you don't need. Use it yourself in a terminal, or let your AI agent do it for you.
 
 - **By hand:** a checklist of every `node_modules` on your machine, biggest first, with what's safe to delete already ticked.
-- **For agents:** JSON output, an exact-path delete with nothing asked, and a ready-made guide ([llms.txt](llms.txt)) and Claude Code skill. Ask your agent to "free up some disk space" and it can scan, show you the list, and delete just what you agree to.
+- **For agents:** one command does the work an agent would otherwise piece together from hundreds of `find`, `du` and `git` calls, and hands back a short JSON summary. That saves tool calls and tokens. Ask your agent to "free up some disk space" and it can scan, show you the list, and delete just what you agree to.
 
 No dependencies. Needs Node 20 or newer. Works on Windows, macOS and Linux.
 
@@ -49,14 +49,23 @@ The header shows how much free space you'll have after deleting what's checked. 
 Agents run commands without a terminal, so nomod never opens the checklist for them and never deletes without `--yes`. The workflow is three steps, with you agreeing in the middle:
 
 ```sh
-# 1. Scan: JSON on stdout, nothing deleted
-nomod --json ~/projects
+# 1. Scan: a short JSON summary on stdout, nothing deleted
+nomod --json --brief ~/projects
 
 # 2. The agent shows you the folders, sizes and reasons, and you agree on a list
 
 # 3. Delete exactly that list: no second scan, no prompt
 nomod --json --yes --delete-from chosen.txt     # one path per line, or a JSON array
 ```
+
+**It saves tokens.** nomod does the finding, sizing, git and lockfile checks itself and reports only the result. Measured on 40 projects:
+
+| Approach | Tool calls | Output |
+| --- | --- | --- |
+| The agent works it out with `find`, `du`, `git`, `ls` | ~200 | ~3,400 tokens of raw output, still to be added up and reasoned over |
+| `nomod --json --brief` | 1 | ~2,700 tokens, already summed, with the reason for each verdict |
+
+JSON is printed on one line when piped, since indentation only costs tokens. Leave out `--brief` for the full detail (file counts, git status, project and repo paths).
 
 What makes it safe to hand to an agent:
 
@@ -94,6 +103,7 @@ The checklist shows why the highlighted row is unchecked; the JSON has it in `ke
 | `--delete-from <file\|->` | delete exactly the folders listed in a file (or `-` for stdin), without scanning |
 | `-y`, `--yes` | skip the confirmation. With no terminal, deletes what is checked |
 | `--json` | JSON output: the scan, or with `--yes` what was deleted |
+| `--brief` | with `--json`, only the fields needed to choose: about half the size |
 | `-h`, `--help` | show help |
 | `-v`, `--version` | show the version |
 
