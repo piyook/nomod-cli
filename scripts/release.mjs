@@ -12,10 +12,10 @@
 // git push with tags.
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { createInterface } from 'node:readline';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -26,10 +26,10 @@ const bumpArg = args.find((a) => !a.startsWith('-'));
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
-const step = (s) => console.log(`\n${bold('▸ ' + s)}`);
+const step = (s) => console.log(`\n${bold(`▸ ${s}`)}`);
 
 function die(msg) {
-  console.error(`\n${red('✗ ' + msg)}`);
+  console.error(`\n${red(`✗ ${msg}`)}`);
   process.exit(1);
 }
 
@@ -54,9 +54,13 @@ const git = (...a) => run('git', a, { capture: true });
 const version = () => JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 const name = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).name;
 
-function ask(q) {
+async function ask(q) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((res) => rl.question(q, (a) => { rl.close(); res(a.trim()); }));
+  try {
+    return (await rl.question(q)).trim();
+  } finally {
+    rl.close();
+  }
 }
 
 // ---------------------------------------------------------------- 1. git
@@ -81,7 +85,11 @@ delete nodeEnv.ELECTRON_RUN_AS_NODE;
 const nomod = (...a) => spawnSync(process.execPath, [path.join(ROOT, 'nomod.js'), ...a], { encoding: 'utf8', env: nodeEnv });
 
 run(process.execPath, ['--check', path.join(ROOT, 'nomod.js')]);
-const check = (ok, label) => { if (!ok) die(`smoke test failed: ${label}`); console.log(`${green('✓')} ${label}`); };
+run(process.execPath, ['--test', path.join(ROOT, 'test', 'nomod.test.js')]);
+const check = (ok, label) => {
+  if (!ok) die(`smoke test failed: ${label}`);
+  console.log(`${green('✓')} ${label}`);
+};
 
 check(nomod('--version').stdout.trim() === version(), '--version prints the package version');
 check(nomod('--help').stdout.includes('Usage: nomod'), '--help prints usage');
@@ -119,7 +127,9 @@ let onNpm = [];
 try {
   const v = JSON.parse(published || '[]');
   if (Array.isArray(v) || typeof v === 'string') onNpm = [].concat(v);
-} catch { /* not published yet */ }
+} catch {
+  /* not published yet */
+}
 console.log(onNpm.length ? `on npm: ${onNpm.slice(-5).join(', ')}` : `${name} is not on npm yet`);
 
 const bump = bumpArg ?? (onNpm.includes(version()) ? 'patch' : null);

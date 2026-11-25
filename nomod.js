@@ -5,27 +5,51 @@
 
 process.env.UV_THREADPOOL_SIZE ??= '32'; // must run before any async fs call
 
-import { readdir, lstat, stat, rm, access } from 'node:fs/promises';
-import { statfsSync, readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
-import { createInterface } from 'node:readline';
+import { readFileSync, statfsSync } from 'node:fs';
+import { access, lstat, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version;
+const LLMS_TXT = fileURLToPath(new URL('./llms.txt', import.meta.url));
 
 // ---------------------------------------------------------------- constants
 
 // Folders never descended into while looking for projects (case-insensitive).
 const SKIP_DIRS = new Set([
-  'appdata', 'application data', 'local settings', '$recycle.bin', 'system volume information',
-  'windows', 'program files', 'program files (x86)', 'programdata', 'library', 'scoop',
-  'bower_components', 'jspm_packages', '__pycache__', 'site-packages',
+  'appdata',
+  'application data',
+  'local settings',
+  '$recycle.bin',
+  'system volume information',
+  'windows',
+  'program files',
+  'program files (x86)',
+  'programdata',
+  'library',
+  'scoop',
+  'bower_components',
+  'jspm_packages',
+  '__pycache__',
+  'site-packages',
 ]);
 // Build/cache output inside a Node project (has package.json). Only with --all.
 const NODE_JUNK = new Set([
-  '.next', '.nuxt', '.output', '.svelte-kit', '.turbo', '.parcel-cache', '.angular', '.docusaurus',
-  '.cache', 'dist', 'build', 'coverage',
+  '.next',
+  '.nuxt',
+  '.output',
+  '.svelte-kit',
+  '.turbo',
+  '.parcel-cache',
+  '.angular',
+  '.docusaurus',
+  '.cache',
+  'dist',
+  'build',
+  'coverage',
 ]);
 // Junk folders that could hold committed files: dropped if git tracks them.
 const MAYBE_TRACKED = new Set(['dist', 'build', 'coverage']);
@@ -50,7 +74,12 @@ Options:
   -m, --min <MB>      hide folders smaller than this (default 0)
   -x, --exclude <re>  skip paths matching this regular expression (repeatable)
   -p, --pick <re>     check exactly the folders whose full path matches (repeatable),
-                      ignoring the defaults below. Others start unchecked
+                      ignoring the defaults below. Others start unchecked. With
+                      --yes, nothing is deleted if any --pick matches no folder
+      --delete-from <file|->
+                      delete exactly these folders, no scan: one path per line, or
+                      a JSON array of paths (or of objects with a "path"), - for
+                      stdin. Each is checked again first, as a scan would
   -y, --yes           don't ask "are you sure" after the picker. Without a terminal
                       (piped / scripted, e.g. an agent), deletes what is checked
       --json          print JSON instead of text. Alone: the scan, nothing deleted.
@@ -67,47 +96,80 @@ git tracks are never listed.
 Picker keys: up/down (or j/k) move, space toggle, a all, n none, i invert,
 s change sort, PgUp/PgDn/Home/End jump, enter delete selected, q / esc quit.
 
-Exit codes: 0 done, 1 error, 2 nothing found, 3 cancelled.`;
+Exit codes: 0 done, 1 error, 2 nothing found, 3 cancelled.
+
+Agents and scripts: the full guide (JSON fields, workflow) is ${LLMS_TXT}`;
+
+// How each option's value is read: a number >= 0, or a case-insensitive regex.
+function toNumber(flag, v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) fail(`${flag}: not a number: ${v}`);
+  return n;
+}
+function toRegExp(flag, v) {
+  try {
+    return new RegExp(v, 'i');
+  } catch (e) {
+    fail(`${flag}: ${e.message}`);
+  }
+}
+
+// Each option: its long name, short name, and what it does to the options
+// `o`. `takes` reads its value, for options that have one.
+const OPTIONS = [
+  { long: '--all', short: '-a', set: (o) => (o.all = true) },
+  { long: '--dry-run', short: '-n', set: (o) => (o.dryRun = true) },
+  { long: '--recent', short: '-r', takes: toNumber, set: (o, v) => (o.recent = v) },
+  { long: '--min', short: '-m', takes: toNumber, set: (o, v) => (o.min = v) },
+  { long: '--exclude', short: '-x', takes: toRegExp, set: (o, v) => o.exclude.push(v) },
+  { long: '--pick', short: '-p', takes: toRegExp, set: (o, v) => o.pick.push(v) },
+  { long: '--yes', short: '-y', set: (o) => (o.yes = true) },
+  { long: '--json', set: (o) => (o.json = true) },
+  { long: '--delete-from', takes: (_, v) => v, set: (o, v) => (o.deleteFrom = v) },
+  { long: '--help', short: '-h', set: () => printAndExit(HELP) },
+  { long: '--version', short: '-v', set: () => printAndExit(VERSION) },
+];
 
 function parseArgs(argv) {
-  const o = { roots: [], all: false, dryRun: false, recent: 14, min: 0, exclude: [], pick: [], yes: false, json: false };
+  const o = { roots: [], all: false, dryRun: false, recent: 14, min: 0, exclude: [], pick: [], yes: false, json: false, deleteFrom: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const val = () => {
-      if (i + 1 >= argv.length) fail(`${a} needs a value`);
-      return argv[++i];
-    };
-    const num = (v) => {
-      const n = Number(v);
-      if (!Number.isFinite(n) || n < 0) fail(`${a}: not a number: ${v}`);
-      return n;
-    };
-    switch (a) {
-      case '-a': case '--all': o.all = true; break;
-      case '-n': case '--dry-run': o.dryRun = true; break;
-      case '-r': case '--recent': o.recent = num(val()); break;
-      case '-m': case '--min': o.min = num(val()); break;
-      case '-x': case '--exclude':
-        try { o.exclude.push(new RegExp(val(), 'i')); } catch (e) { fail(`--exclude: ${e.message}`); }
-        break;
-      case '-p': case '--pick':
-        try { o.pick.push(new RegExp(val(), 'i')); } catch (e) { fail(`--pick: ${e.message}`); }
-        break;
-      case '-y': case '--yes': o.yes = true; break;
-      case '--json': o.json = true; break;
-      case '-h': case '--help': console.log(HELP); process.exit(0);
-      case '-v': case '--version': console.log(VERSION); process.exit(0);
-      default:
-        if (a.startsWith('-')) fail(`unknown option ${a} (see nomod --help)`);
-        o.roots.push(path.resolve(a));
+    const opt = OPTIONS.find((x) => x.long === a || x.short === a);
+    if (!opt) {
+      if (a.startsWith('-')) fail(`unknown option ${a} (see nomod --help)`);
+      o.roots.push(path.resolve(a));
+      continue;
     }
+    if (!opt.takes) {
+      opt.set(o);
+      continue;
+    }
+    if (i + 1 >= argv.length) fail(`${a} needs a value`);
+    opt.set(o, opt.takes(opt.long, argv[++i]));
   }
+  if (o.deleteFrom != null && (o.roots.length || o.pick.length)) fail('--delete-from takes no folder and no --pick: the list says what to delete');
   if (!o.roots.length) o.roots.push(os.homedir());
   return o;
 }
 
+// Bumped when a JSON field is renamed or removed (new fields don't bump it).
+const SCHEMA_VERSION = 1;
+// Known before the arguments are parsed, so that errors in them come out as JSON too.
+const JSON_MODE = process.argv.slice(2).includes('--json');
+
+function printJson(obj) {
+  console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, ...obj }, null, 2));
+}
+
+// With --json, errors are also a JSON object on stdout: { schemaVersion, error }.
+function printAndExit(text) {
+  console.log(text);
+  process.exit(0);
+}
+
 function fail(msg) {
   process.stderr.write(`nomod: ${msg}\n`);
+  if (JSON_MODE) printJson({ error: String(msg).split('\n')[0] });
   process.exit(1);
 }
 
@@ -116,15 +178,23 @@ function fail(msg) {
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const paint = (code) => (s) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : String(s));
 const c = {
-  dim: paint('2'), bold: paint('1'), red: paint('31'), green: paint('32'), yellow: paint('33'),
-  cyan: paint('36'), inverse: paint('7'),
+  dim: paint('2'),
+  bold: paint('1'),
+  red: paint('31'),
+  green: paint('32'),
+  yellow: paint('33'),
+  cyan: paint('36'),
+  inverse: paint('7'),
 };
 
 function fmtSize(b) {
   if (b < 1024) return `${b} B`;
   const u = ['KB', 'MB', 'GB', 'TB'];
   let i = -1;
-  do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+  do {
+    b /= 1024;
+    i++;
+  } while (b >= 1024 && i < u.length - 1);
   return `${b >= 100 ? b.toFixed(0) : b.toFixed(1)} ${u[i]}`;
 }
 
@@ -138,10 +208,19 @@ function fmtAge(ms) {
   return `${Math.floor(d / 365)}y`;
 }
 
-const exists = (p) => access(p).then(() => true, () => false);
+const exists = (p) =>
+  access(p).then(
+    () => true,
+    () => false,
+  );
 
 function freeBytes(p) {
-  try { const s = statfsSync(p); return s.bavail * s.bsize; } catch { return null; }
+  try {
+    const s = statfsSync(p);
+    return s.bavail * s.bsize;
+  } catch {
+    return null;
+  }
 }
 
 function git(cwd, args, maxBuffer = 8 * 1024 * 1024) {
@@ -154,7 +233,7 @@ let statusShown = false;
 function status(msg) {
   if (!process.stderr.isTTY) return;
   const w = (process.stderr.columns || 80) - 1;
-  process.stderr.write(`\r\x1b[K${msg.length > w ? msg.slice(0, w - 1) + '…' : msg}`);
+  process.stderr.write(`\r\x1b[K${msg.length > w ? `${msg.slice(0, w - 1)}…` : msg}`);
   statusShown = true;
 }
 function clearStatus() {
@@ -173,7 +252,12 @@ function parallelWalk(starts, visit, limit = 64) {
         const dir = stack.pop();
         active++;
         visit(dir)
-          .then((kids) => { if (kids) stack.push(...kids); }, () => {})
+          .then(
+            (kids) => {
+              if (kids) stack.push(...kids);
+            },
+            () => {},
+          )
           .finally(() => {
             active--;
             if (!stack.length && !active) resolve();
@@ -195,7 +279,11 @@ async function discover(opts) {
 
   await parallelWalk(opts.roots, async (dir) => {
     let ents;
-    try { ents = await readdir(dir, { withFileTypes: true }); } catch { return []; }
+    try {
+      ents = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
     if (++dirs % 500 === 0) status(`Scanning… ${dirs.toLocaleString()} folders, ${found.length} found  ${dir}`);
 
     const names = new Set(ents.map((e) => e.name));
@@ -231,20 +319,37 @@ async function discover(opts) {
 async function dirSize(root, onProgress) {
   let bytes = 0;
   let files = 0;
-  await parallelWalk([root], async (dir) => {
-    let ents;
-    try { ents = await readdir(dir, { withFileTypes: true }); } catch { return []; }
-    const kids = [];
-    const sizes = [];
-    for (const e of ents) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) kids.push(full);
-      else if (e.isFile()) sizes.push(lstat(full).then((s) => s.size, () => 0));
-    }
-    for (const s of await Promise.all(sizes)) { bytes += s; files++; }
-    onProgress?.(files);
-    return kids;
-  }, 96);
+  await parallelWalk(
+    [root],
+    async (dir) => {
+      let ents;
+      try {
+        ents = await readdir(dir, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+      const kids = [];
+      const sizes = [];
+      for (const e of ents) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) kids.push(full);
+        else if (e.isFile())
+          sizes.push(
+            lstat(full).then(
+              (s) => s.size,
+              () => 0,
+            ),
+          );
+      }
+      for (const s of await Promise.all(sizes)) {
+        bytes += s;
+        files++;
+      }
+      onProgress?.(files);
+      return kids;
+    },
+    96,
+  );
   return { bytes, files };
 }
 
@@ -255,7 +360,11 @@ async function lastUsed(project, gitRoot) {
   let budget = 4000;
   const walk = async (dir, depth) => {
     let ents;
-    try { ents = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    try {
+      ents = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
     const subdirs = [];
     const stats = [];
     for (const e of ents) {
@@ -263,7 +372,13 @@ async function lastUsed(project, gitRoot) {
       const lname = e.name.toLowerCase();
       if (e.name.startsWith('.') || lname === 'node_modules' || NODE_JUNK.has(lname) || VENV_NAMES.has(lname)) continue;
       const full = path.join(dir, e.name);
-      if (e.isFile()) stats.push(lstat(full).then((s) => s.mtimeMs, () => 0));
+      if (e.isFile())
+        stats.push(
+          lstat(full).then(
+            (s) => s.mtimeMs,
+            () => 0,
+          ),
+        );
       else if (e.isDirectory() && depth < 3) subdirs.push(full);
     }
     for (const m of await Promise.all(stats)) if (m > latest) latest = m;
@@ -304,8 +419,9 @@ async function enrich(found, opts) {
   // Sizing is the slow part: a few folders at a time, each walked in parallel.
   const queue = [...found];
   const worker = async () => {
-    for (let f; (f = queue.shift()); ) {
-      let base = filesSeen;
+    while (queue.length) {
+      const f = queue.shift();
+      const base = filesSeen;
       const { bytes, files } = await dirSize(f.path, (n) => {
         filesSeen = base + n;
         status(`Sizing ${done + 1}/${found.length}… ${filesSeen.toLocaleString()} files  ${f.path}`);
@@ -317,14 +433,24 @@ async function enrich(found, opts) {
       if (!gitRoots.has(f.project)) gitRoots.set(f.project, findGitRoot(f.project));
       const gitRoot = await gitRoots.get(f.project);
       if (gitRoot && !dirty.has(gitRoot)) {
-        dirty.set(gitRoot, git(gitRoot, ['status', '--porcelain']).then((o) => (o == null ? null : o.split('\n').filter(Boolean).length)));
+        dirty.set(
+          gitRoot,
+          git(gitRoot, ['status', '--porcelain']).then((o) => (o == null ? null : o.split('\n').filter(Boolean).length)),
+        );
       }
       if (gitRoot && !remotes.has(gitRoot)) remotes.set(gitRoot, remoteRepoName(gitRoot));
       if (!used.has(f.project)) used.set(f.project, lastUsed(f.project, gitRoot));
 
       const row = {
-        ...f, size: bytes, files, gitRoot, repoName: gitRoot ? await remotes.get(gitRoot) : null,
-        lastUsed: await used.get(f.project), dirty: gitRoot ? await dirty.get(gitRoot) : null, tags: [], why: [],
+        ...f,
+        size: bytes,
+        files,
+        gitRoot,
+        repoName: gitRoot ? await remotes.get(gitRoot) : null,
+        lastUsed: await used.get(f.project),
+        dirty: gitRoot ? await dirty.get(gitRoot) : null,
+        tags: [],
+        why: [],
       };
 
       if (f.kind === 'node_modules') {
@@ -345,10 +471,21 @@ async function enrich(found, opts) {
   for (const r of rows) {
     r.name = projectName(r);
     if (r.lastUsed && Date.now() - r.lastUsed < recentMs) r.why.push(fmtAge(r.lastUsed) === 'today' ? 'used today' : `used ${fmtAge(r.lastUsed)} ago`);
-    if (r.kind === 'node_modules' && !r.hasPkg) { r.tags.push('no-pkg'); r.why.push('no package.json next to it'); }
-    else if (r.kind === 'node_modules' && !r.lock) { r.tags.push('no-lock'); r.why.push('no lockfile: a reinstall may differ'); }
-    if (r.kind === 'venv' && !r.hasReqs) { r.tags.push('no-reqs'); r.why.push('no requirements/pyproject file'); }
-    if (MAYBE_TRACKED.has(r.kind.toLowerCase()) && !r.gitRoot) { r.tags.push('no-git'); r.why.push('not in git: may not be rebuildable'); }
+    if (r.kind === 'node_modules' && !r.hasPkg) {
+      r.tags.push('no-pkg');
+      r.why.push('no package.json next to it');
+    } else if (r.kind === 'node_modules' && !r.lock) {
+      r.tags.push('no-lock');
+      r.why.push('no lockfile: a reinstall may differ');
+    }
+    if (r.kind === 'venv' && !r.hasReqs) {
+      r.tags.push('no-reqs');
+      r.why.push('no requirements/pyproject file');
+    }
+    if (MAYBE_TRACKED.has(r.kind.toLowerCase()) && !r.gitRoot) {
+      r.tags.push('no-git');
+      r.why.push('not in git: may not be rebuildable');
+    }
     if (!r.gitRoot) r.git = 'no git';
     else if (r.dirty == null) r.git = '?';
     else r.git = r.dirty ? `${r.dirty} dirty` : 'clean';
@@ -382,13 +519,20 @@ async function remoteRepoName(gitRoot) {
   const out = await git(gitRoot, ['config', '--get-regexp', '^remote\\..*\\.url$']);
   if (!out) return null;
   // Each line is "<key> <url>"; split on the first space only, URLs can hold spaces.
-  const urls = out.trim().split('\n').map((l) => {
-    const t = l.trim();
-    const i = t.search(/\s/);
-    return i < 0 ? [t, ''] : [t.slice(0, i), t.slice(i + 1).trim()];
-  });
+  const urls = out
+    .trim()
+    .split('\n')
+    .map((l) => {
+      const t = l.trim();
+      const i = t.search(/\s/);
+      return i < 0 ? [t, ''] : [t.slice(0, i), t.slice(i + 1).trim()];
+    });
   const [, url] = urls.find(([key]) => key === 'remote.origin.url') ?? urls[0] ?? [];
-  const name = url?.replace(/[\\/]+$/, '').split(/[\\/:]/).pop()?.replace(/\.git$/i, '');
+  const name = url
+    ?.replace(/[\\/]+$/, '')
+    .split(/[\\/:]/)
+    .pop()
+    ?.replace(/\.git$/i, '');
   return name || null;
 }
 
@@ -412,7 +556,7 @@ function truncMiddle(s, w) {
   if (s.length <= w) return s;
   if (w <= 1) return w === 1 ? '…' : '';
   const head = Math.floor((w - 1) / 2);
-  return s.slice(0, head) + '…' + s.slice(s.length - (w - 1 - head));
+  return `${s.slice(0, head)}…${s.slice(s.length - (w - 1 - head))}`;
 }
 
 const NAME_MAX = 28;
@@ -420,7 +564,10 @@ const MIN_PATH = 10;
 const BASE_W = 4 + 8 + 1 + 12 + 1 + 5 + 1 + 9 + 1 + 12 + 1; // checkbox .. notes, with spaces
 let nameWidth = 7; // set from the rows by setNameWidth, at least as wide as "project"
 function setNameWidth(rows) {
-  nameWidth = Math.min(NAME_MAX, rows.reduce((m, r) => Math.max(m, r.name.length), 7));
+  nameWidth = Math.min(
+    NAME_MAX,
+    rows.reduce((m, r) => Math.max(m, r.name.length), 7),
+  );
 }
 
 // Column widths for a row of `width` characters: the project column shrinks
@@ -447,12 +594,13 @@ function rowCells(r, roots) {
 function colorRow(cells, r, width) {
   const lay = layout(width);
   let p = cells.path;
-  if (p.length > lay.path) p = lay.path ? '…' + p.slice(p.length - lay.path + 1) : '';
+  if (p.length > lay.path) p = lay.path ? `…${p.slice(p.length - lay.path + 1)}` : '';
   const sizeCol = r.size >= 1024 ** 3 ? c.red(cells.size) : r.size >= 300 * 1024 ** 2 ? c.yellow(cells.size) : cells.size;
   const recent = r.why.some((w) => w.startsWith('used'));
   return [
     r.checked ? c.green('[x]') : c.dim('[ ]'),
-    sizeCol, c.dim(cells.kind),
+    sizeCol,
+    c.dim(cells.kind),
     recent ? c.green(cells.age) : c.dim(cells.age),
     r.git.includes('dirty') ? c.yellow(cells.git) : c.dim(cells.git),
     c.yellow(cells.tags),
@@ -463,8 +611,21 @@ function colorRow(cells, r, width) {
 
 const header = (width) => {
   const lay = layout(width);
-  return '    ' + 'size'.padStart(8) + ' ' + 'kind'.padEnd(12) + ' ' + 'used'.padEnd(5) + ' ' +
-    'git'.padEnd(9) + ' ' + 'notes'.padEnd(12) + ' ' + (lay.name ? 'project'.padEnd(lay.name) + ' ' : '') + 'path';
+  return (
+    '    ' +
+    'size'.padStart(8) +
+    ' ' +
+    'kind'.padEnd(12) +
+    ' ' +
+    'used'.padEnd(5) +
+    ' ' +
+    'git'.padEnd(9) +
+    ' ' +
+    'notes'.padEnd(12) +
+    ' ' +
+    (lay.name ? `${'project'.padEnd(lay.name)} ` : '') +
+    'path'
+  );
 };
 
 // "free now → free after deleting the selection", e.g. "2.1 GB → 4.0 GB"
@@ -480,8 +641,7 @@ function printReport(rows, opts) {
   const total = rows.reduce((s, r) => s + r.size, 0);
   const sel = rows.filter((r) => r.checked);
   const selTotal = sel.reduce((s, r) => s + r.size, 0);
-  console.log(`\n${rows.length} folders, ${c.bold(fmtSize(total))} in all. ` +
-    `${sel.length} checked by default (${c.bold(fmtSize(selTotal))}).`);
+  console.log(`\n${rows.length} folders, ${c.bold(fmtSize(total))} in all. ` + `${sel.length} checked by default (${c.bold(fmtSize(selTotal))}).`);
   console.log(`Deleting the checked ones: ${freeLine(freeBytes(opts.roots[0]), selTotal)}`);
   console.log(`Deleting all of them:      ${freeLine(freeBytes(opts.roots[0]), total)}`);
 }
@@ -508,12 +668,14 @@ function picker(rows, opts) {
       const selTotal = sel.reduce((s, r) => s + r.size, 0);
       const total = rows.reduce((s, r) => s + r.size, 0);
       const lines = [];
-      lines.push(`${c.bold('nomod')}  ${rows.length} folders, ${fmtSize(total)}  ·  ` +
-        `${c.green(`${sel.length} selected`)}  ·  ${freeLine(free, selTotal)}  ·  sort: ${sortKey}`);
+      lines.push(
+        `${c.bold('nomod')}  ${rows.length} folders, ${fmtSize(total)}  ·  ` +
+          `${c.green(`${sel.length} selected`)}  ·  ${freeLine(free, selTotal)}  ·  sort: ${sortKey}`,
+      );
       lines.push(c.dim('  ↑↓ move  space toggle  a all  n none  i invert  s sort  enter delete selected  q quit'));
       // Rows use width - 3: 2 for the cursor column, 1 spare so a full-width
       // line never triggers the terminal's wrap-at-last-column behaviour.
-      lines.push(c.dim('  ' + header(width - 3)));
+      lines.push(c.dim(`  ${header(width - 3)}`));
       for (let i = top; i < Math.min(rows.length, top + view); i++) {
         const r = rows[i];
         const line = colorRow(rowCells(r, opts.roots), r, width - 3);
@@ -523,9 +685,13 @@ function picker(rows, opts) {
       const cur = rows[cursor];
       const info = cur.why.length ? `kept by default: ${cur.why.join('; ')}` : 'nothing against deleting it';
       lines.push(c.dim('─'.repeat(Math.min(width - 1, 100))));
-      lines.push(c.cyan(cur.path.length > width - 1 ? '…' + cur.path.slice(cur.path.length - width + 2) : cur.path));
-      lines.push(c.dim(`${cur.files.toLocaleString()} files · last used ${cur.lastUsed ? new Date(cur.lastUsed).toLocaleDateString() : '?'} · ${info}`.slice(0, width - 1)));
-      out.write('\x1b[H' + lines.map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
+      lines.push(c.cyan(cur.path.length > width - 1 ? `…${cur.path.slice(cur.path.length - width + 2)}` : cur.path));
+      lines.push(
+        c.dim(
+          `${cur.files.toLocaleString()} files · last used ${cur.lastUsed ? new Date(cur.lastUsed).toLocaleDateString() : '?'} · ${info}`.slice(0, width - 1),
+        ),
+      );
+      out.write(`\x1b[H${lines.map((l) => `${l}\x1b[K`).join('\n')}\x1b[J`);
     };
 
     const resort = () => {
@@ -547,25 +713,58 @@ function picker(rows, opts) {
       const k = buf.toString();
       const page = Math.max(1, (out.rows || 30) - 7);
       switch (k) {
-        case '\x1b[A': case 'k': cursor = Math.max(0, cursor - 1); break;
-        case '\x1b[B': case 'j': cursor = Math.min(rows.length - 1, cursor + 1); break;
-        case '\x1b[5~': cursor = Math.max(0, cursor - page); break;
-        case '\x1b[6~': cursor = Math.min(rows.length - 1, cursor + page); break;
-        case '\x1b[H': case '\x1b[1~': case 'g': cursor = 0; break;
-        case '\x1b[F': case '\x1b[4~': case 'G': cursor = rows.length - 1; break;
-        case ' ': rows[cursor].checked = !rows[cursor].checked; cursor = Math.min(rows.length - 1, cursor + 1); break;
-        case 'a': rows.forEach((r) => (r.checked = true)); break;
-        case 'n': rows.forEach((r) => (r.checked = false)); break;
-        case 'i': rows.forEach((r) => (r.checked = !r.checked)); break;
+        case '\x1b[A':
+        case 'k':
+          cursor = Math.max(0, cursor - 1);
+          break;
+        case '\x1b[B':
+        case 'j':
+          cursor = Math.min(rows.length - 1, cursor + 1);
+          break;
+        case '\x1b[5~':
+          cursor = Math.max(0, cursor - page);
+          break;
+        case '\x1b[6~':
+          cursor = Math.min(rows.length - 1, cursor + page);
+          break;
+        case '\x1b[H':
+        case '\x1b[1~':
+        case 'g':
+          cursor = 0;
+          break;
+        case '\x1b[F':
+        case '\x1b[4~':
+        case 'G':
+          cursor = rows.length - 1;
+          break;
+        case ' ':
+          rows[cursor].checked = !rows[cursor].checked;
+          cursor = Math.min(rows.length - 1, cursor + 1);
+          break;
+        case 'a':
+          for (const r of rows) r.checked = true;
+          break;
+        case 'n':
+          for (const r of rows) r.checked = false;
+          break;
+        case 'i':
+          for (const r of rows) r.checked = !r.checked;
+          break;
         case 's': {
           const keys = Object.keys(SORTS);
           sortKey = keys[(keys.indexOf(sortKey) + 1) % keys.length];
           resort();
           break;
         }
-        case '\r': case '\n': return finish(true);
-        case 'q': case '\x1b': case '\x03': return finish(false);
-        default: return;
+        case '\r':
+        case '\n':
+          return finish(true);
+        case 'q':
+        case '\x1b':
+        case '\x03':
+          return finish(false);
+        default:
+          return;
       }
       render();
     };
@@ -584,7 +783,12 @@ function picker(rows, opts) {
 
 function ask(q) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((res) => rl.question(q, (a) => { rl.close(); res(a.trim()); }));
+  return new Promise((res) =>
+    rl.question(q, (a) => {
+      rl.close();
+      res(a.trim());
+    }),
+  );
 }
 
 // ---------------------------------------------------------------- deleting
@@ -600,37 +804,195 @@ async function removeOne(r) {
   await rm(r.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 });
 }
 
-async function deleteAll(sel, opts) {
+// `refused`: paths from --delete-from that failed their checks; they count as
+// failed. `extra`: more fields for the JSON result.
+async function deleteAll(sel, opts, refused = [], extra = {}) {
   const before = freeBytes(opts.roots[0]);
   let freed = 0;
-  let failed = 0;
-  const result = { deleted: [], failed: [] };
+  let failed = refused.length;
+  const entry = (r) => ({ path: r.path, kind: r.kind ?? null, name: r.name ?? null, size: r.size ?? null });
+  const result = { deleted: [], failed: refused.map((f) => ({ ...entry(f), error: f.error })) };
   const log = opts.json ? () => {} : console.log;
+  for (const f of refused) log(`${c.red('✗')} ${''.padStart(8)}  ${f.path}\n            ${f.error}`);
   for (const [i, r] of sel.entries()) {
     status(`Deleting ${i + 1}/${sel.length}  ${r.path}`);
     try {
       await removeOne(r);
       freed += r.size;
-      result.deleted.push({ path: r.path, size: r.size });
+      result.deleted.push(entry(r));
       clearStatus();
       log(`${c.green('✓')} ${fmtSize(r.size).padStart(8)}  ${r.path}`);
     } catch (e) {
       failed++;
-      result.failed.push({ path: r.path, size: r.size, error: `${e.code ? e.code + ': ' : ''}${e.message}` });
+      result.failed.push({ ...entry(r), error: errorText(e) });
       clearStatus();
       log(`${c.red('✗')} ${''.padStart(8)}  ${r.path}\n            ${c.red(e.code ?? '')} ${e.message}`);
     }
   }
   const after = freeBytes(opts.roots[0]);
   if (opts.json) {
-    console.log(JSON.stringify({ ...result, freedBytes: freed, freeBytesBefore: before, freeBytesAfter: after }, null, 2));
+    printJson({ ...result, freedBytes: freed, freeBytesBefore: before, freeBytesAfter: after, ...extra });
     return failed ? 1 : 0;
   }
-  console.log(`\nDeleted ${sel.length - failed} of ${sel.length} folders, about ${c.bold(fmtSize(freed))}.` +
-    (before != null && after != null ? ` Free space: ${fmtSize(before)} → ${c.bold(fmtSize(after))}.` : ''));
-  if (failed) console.log(c.yellow(`${failed} could not be deleted (a program may have files open there: close editors/dev servers and run nomod again).`));
-  if (sel.some((r) => r.tags.includes('pnpm'))) console.log(c.dim('pnpm projects share a store, so they free less than their size. `pnpm store prune` reclaims the rest.'));
+  console.log(
+    `\nDeleted ${result.deleted.length} of ${sel.length + refused.length} folders, about ${c.bold(fmtSize(freed))}.` +
+      (before != null && after != null ? ` Free space: ${fmtSize(before)} → ${c.bold(fmtSize(after))}.` : ''),
+  );
+  if (refused.length) console.log(c.yellow(`${refused.length} refused: not a folder nomod deletes, or not there (see above).`));
+  if (failed > refused.length)
+    console.log(
+      c.yellow(`${failed - refused.length} could not be deleted (a program may have files open there: close editors/dev servers and run nomod again).`),
+    );
+  if (sel.some((r) => r.tags.includes('pnpm')))
+    console.log(c.dim('pnpm projects share a store, so they free less than their size. `pnpm store prune` reclaims the rest.'));
   return failed ? 1 : 0;
+}
+
+// ---------------------------------------------------------------- --delete-from
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    process.stdin.on('data', (d) => chunks.push(d));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.on('error', reject);
+  });
+}
+
+// The paths in a --delete-from list: one per line, or a JSON array of paths or
+// of objects with a "path" (so a filtered `folders` array from a scan works).
+async function readPathList(src) {
+  let text;
+  try {
+    text = src === '-' ? await readStdin() : readFileSync(src, 'utf8');
+  } catch (e) {
+    fail(`--delete-from: ${e.message}`);
+  }
+  const t = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).trim(); // drop a byte-order mark
+  let list;
+  if (t.startsWith('{')) fail('--delete-from: give a list of paths (one per line, or a JSON array), not a whole scan result');
+  if (t.startsWith('[')) {
+    let arr;
+    try {
+      arr = JSON.parse(t);
+    } catch (e) {
+      fail(`--delete-from: not valid JSON: ${e.message}`);
+    }
+    list = arr.map((x) => (typeof x === 'string' ? x : x?.path));
+    if (list.some((p) => typeof p !== 'string' || !p)) fail('--delete-from: the JSON array must hold paths, or objects with a "path"');
+  } else {
+    list = t
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+  }
+  const seen = new Set();
+  return list.map((p) => path.resolve(p)).filter((p) => !seen.has(normPath(p)) && seen.add(normPath(p)));
+}
+
+// The checks a scan would have made before listing this folder. Returns its
+// kind, or { error } when nomod must not delete it.
+async function checkTarget(p) {
+  const base = path.basename(p);
+  const name = base.toLowerCase();
+  if (!DELETABLE.has(name)) return { error: `refusing: ${base} is not a folder nomod deletes` };
+  const st = await lstat(p).catch((e) => e);
+  if (st instanceof Error) return { error: errorText(st) };
+  if (st.isSymbolicLink() || !st.isDirectory()) return { error: 'refusing: not a real folder (link or file)' };
+  const parent = path.dirname(p);
+  if (parent.toLowerCase().split(/[\\/]/).includes('node_modules')) return { error: 'refusing: it is inside another node_modules' };
+  if (name === 'node_modules') return { kind: 'node_modules' };
+  if (VENV_NAMES.has(name)) return checkVenv(p);
+  return checkBuildOutput(parent, base);
+}
+
+async function checkVenv(p) {
+  return (await exists(path.join(p, 'pyvenv.cfg'))) ? { kind: 'venv' } : { error: 'refusing: not a Python venv (no pyvenv.cfg)' };
+}
+
+// An --all folder (dist, .next, ...): it must sit in a Node project, and
+// dist/build/coverage must not be committed.
+async function checkBuildOutput(parent, base) {
+  if (!(await exists(path.join(parent, 'package.json')))) return { error: 'refusing: no package.json beside it, so not build output of a Node project' };
+  if (!MAYBE_TRACKED.has(base.toLowerCase()) || !(await findGitRoot(parent))) return { kind: base };
+  const tracked = await git(parent, ['ls-files', '--', base], 64 * 1024 * 1024);
+  return tracked == null || tracked.trim() ? { error: 'refusing: git tracks files in it' } : { kind: base };
+}
+
+const errorText = (e) => `${e.code ? `${e.code}: ` : ''}${e.message}`;
+
+// Split the listed paths into the ones nomod may delete (with their project
+// name) and the refused ones.
+async function checkListed(paths) {
+  const ok = [];
+  const refused = [];
+  const repoNames = new Map(); // git root -> promise of remote repo name
+  for (const p of paths) {
+    const r = await checkTarget(p);
+    if (r.error) {
+      refused.push({ path: p, error: r.error });
+      continue;
+    }
+    const project = path.dirname(p);
+    const gitRoot = await findGitRoot(project);
+    if (gitRoot && !repoNames.has(gitRoot)) repoNames.set(gitRoot, remoteRepoName(gitRoot));
+    const row = { path: p, kind: r.kind, project, gitRoot, repoName: gitRoot ? await repoNames.get(gitRoot) : null };
+    ok.push({ ...row, name: projectName(row) });
+  }
+  // A folder inside another one on the list goes with it: don't count it twice.
+  return { rows: ok.filter((r) => !ok.some((o) => o !== r && isInside(r.path, o.path))), refused };
+}
+
+async function sizeListed(rows) {
+  for (const [i, r] of rows.entries()) {
+    const { bytes, files } = await dirSize(r.path, (n) => status(`Sizing ${i + 1}/${rows.length}… ${n.toLocaleString()} files  ${r.path}`));
+    Object.assign(r, { size: bytes, files, tags: (await exists(path.join(r.path, '.pnpm'))) ? ['pnpm'] : [], checked: true });
+  }
+  clearStatus();
+}
+
+// The list --delete-from would delete, without deleting it. Its exit code.
+function previewListed(rows, refused, total, opts) {
+  const code = refused.length ? 1 : rows.length ? 0 : 2;
+  if (opts.json) {
+    printJson({
+      freeBytes: freeBytes(opts.roots[0]),
+      totalBytes: total,
+      folders: rows.map(({ path: p, kind, name, size, files, tags }) => ({ path: p, kind, name, size, files, tags })),
+      refused,
+    });
+    return code;
+  }
+  for (const r of rows) console.log(`  ${fmtSize(r.size).padStart(8)}  ${r.path}`);
+  for (const f of refused) console.log(`${c.red('✗')} ${''.padStart(8)}  ${f.path}\n            ${f.error}`);
+  console.log(`\n${rows.length} to delete: ${freeLine(freeBytes(opts.roots[0]), total)}${refused.length ? c.yellow(`. ${refused.length} refused.`) : ''}`);
+  return code;
+}
+
+// "Delete these N folders?" False, after saying so, on anything but yes.
+async function confirmDelete(rows, total) {
+  const a = await ask(`Delete these ${rows.length} folders (${c.bold(fmtSize(total))})? [y/N] `);
+  if (/^y(es)?$/i.test(a)) return true;
+  console.log('Cancelled. Nothing deleted.');
+  return false;
+}
+
+async function deleteListed(opts, interactive) {
+  const paths = await readPathList(opts.deleteFrom);
+  if (!paths.length) fail('--delete-from: the list is empty');
+  const { rows, refused } = await checkListed(paths);
+  await sizeListed(rows);
+  opts.roots = [path.dirname(rows[0]?.path ?? process.cwd())]; // where free space is measured
+  const total = rows.reduce((s, r) => s + r.size, 0);
+
+  if (!opts.dryRun && opts.yes) return deleteAll(rows, opts, refused);
+  const code = previewListed(rows, refused, total, opts);
+  if (opts.json || opts.dryRun || !rows.length) return code;
+  if (!interactive) {
+    console.log(c.dim('\nNo terminal, so nothing was deleted. Add --yes to delete them.'));
+    return code;
+  }
+  return (await confirmDelete(rows, total)) ? deleteAll(rows, opts, refused) : 3;
 }
 
 // ---------------------------------------------------------------- main
@@ -642,6 +1004,7 @@ async function main() {
     if (!st?.isDirectory()) fail(`not a folder: ${r}`);
   }
   const interactive = process.stdin.isTTY && process.stdout.isTTY && !opts.json;
+  if (opts.deleteFrom != null) return deleteListed(opts, interactive);
 
   const t0 = Date.now();
   const { found, dirs } = await discover(opts);
@@ -650,22 +1013,11 @@ async function main() {
   setNameWidth(rows);
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
 
-  if (opts.json && (!opts.yes || opts.dryRun)) {
-    const free = freeBytes(opts.roots[0]);
-    const sum = (rs) => rs.reduce((s, r) => s + r.size, 0);
-    console.log(JSON.stringify({
-      roots: opts.roots,
-      freeBytes: free,
-      totalBytes: sum(rows),
-      checkedBytes: sum(rows.filter((r) => r.checked)),
-      folders: rows.map(({ path: p, kind, name, project, size, files, lastUsed: lu, gitRoot, git: g, tags, why, checked }) =>
-        ({ path: p, kind, name, project, size, files, lastUsed: lu && new Date(lu).toISOString(), gitRoot, git: g, tags, keepReasons: why, checked })),
-    }, null, 2));
-    return rows.length ? 0 : 2;
-  }
+  const unmatchedPicks = findUnmatchedPicks(opts, rows);
+  if (opts.json && (!opts.yes || opts.dryRun)) return printScanJson(rows, opts, unmatchedPicks);
   if (!rows.length) {
-    if (opts.json) { console.log(JSON.stringify({ deleted: [], failed: [], freedBytes: 0 })); return 2; }
-    console.log(`Nothing found (${dirs.toLocaleString()} folders scanned in ${secs}s).`);
+    if (opts.json) printJson({ ...nothingDeleted(opts), unmatchedPicks });
+    else console.log(`Nothing found (${dirs.toLocaleString()} folders scanned in ${secs}s).`);
     return 2;
   }
   console.error(c.dim(`Scanned ${dirs.toLocaleString()} folders in ${secs}s.`));
@@ -675,33 +1027,79 @@ async function main() {
     if (!opts.dryRun) console.log(c.dim('\nNo terminal, so nothing was deleted. Run nomod in a terminal, or add --yes to delete the checked ones.'));
     return 0;
   }
+  if (opts.yes && unmatchedPicks.length) {
+    if (opts.json) printJson({ ...nothingDeleted(opts), unmatchedPicks });
+    else console.log('Nothing deleted: a --pick matches no folder (see above). Check the pattern against a scan.');
+    return 2;
+  }
+  return deleteChosen(rows, opts, interactive, unmatchedPicks);
+}
 
+// A --pick that matches nothing is most likely a typo: say so. With --yes,
+// main then deletes nothing, since the selection is not what was asked for.
+function findUnmatchedPicks(opts, rows) {
+  const unmatched = opts.pick.filter((re) => !rows.some((r) => re.test(r.path))).map((re) => re.source);
+  for (const p of unmatched) process.stderr.write(`nomod: --pick '${p}' matches no folder\n`);
+  return unmatched;
+}
+
+const nothingDeleted = (opts) => {
+  const free = freeBytes(opts.roots[0]);
+  return { deleted: [], failed: [], freedBytes: 0, freeBytesBefore: free, freeBytesAfter: free };
+};
+
+function printScanJson(rows, opts, unmatchedPicks) {
+  const sum = (rs) => rs.reduce((s, r) => s + r.size, 0);
+  printJson({
+    roots: opts.roots,
+    freeBytes: freeBytes(opts.roots[0]),
+    totalBytes: sum(rows),
+    checkedBytes: sum(rows.filter((r) => r.checked)),
+    unmatchedPicks,
+    folders: rows.map(({ path: p, kind, name, project, size, files, lastUsed: lu, gitRoot, git: g, tags, why, checked }) => ({
+      path: p,
+      kind,
+      name,
+      project,
+      size,
+      files,
+      lastUsed: lu && new Date(lu).toISOString(),
+      gitRoot,
+      git: g,
+      tags,
+      keepReasons: why,
+      checked,
+    })),
+  });
+  return rows.length ? 0 : 2;
+}
+
+// The picker (in a terminal), then "are you sure" (unless --yes), then delete.
+async function deleteChosen(rows, opts, interactive, unmatchedPicks) {
   if (interactive && !(await picker(rows, opts))) {
     console.log('Cancelled. Nothing deleted.');
     return 3;
   }
   const sel = rows.filter((r) => r.checked);
-  if (!sel.length) {
-    if (opts.json) return deleteAll(sel, opts);
+  if (!sel.length && !opts.json) {
     console.log('Nothing selected. Nothing deleted.');
     return 0;
   }
-  const selTotal = sel.reduce((s, r) => s + r.size, 0);
   if (!opts.yes) {
+    const selTotal = sel.reduce((s, r) => s + r.size, 0);
     for (const r of sel.slice(0, 25)) console.log(`  ${fmtSize(r.size).padStart(8)}  ${r.path}`);
     if (sel.length > 25) console.log(c.dim(`  … and ${sel.length - 25} more`));
     console.log(`\n${freeLine(freeBytes(opts.roots[0]), selTotal)}`);
-    const a = await ask(`Delete these ${sel.length} folders (${c.bold(fmtSize(selTotal))})? [y/N] `);
-    if (!/^y(es)?$/i.test(a)) {
-      console.log('Cancelled. Nothing deleted.');
-      return 3;
-    }
+    if (!(await confirmDelete(sel, selTotal))) return 3;
   }
-  return deleteAll(sel, opts);
+  return deleteAll(sel, opts, [], { unmatchedPicks });
 }
 
-main().then((code) => process.exit(code), (e) => {
-  clearStatus();
-  if (process.stdout.isTTY) process.stdout.write('\x1b[?7h\x1b[?25h');
-  fail(e.stack || e.message);
-});
+main().then(
+  (code) => process.exit(code),
+  (e) => {
+    clearStatus();
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?7h\x1b[?25h');
+    fail(e.stack || e.message);
+  },
+);
