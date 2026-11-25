@@ -1,11 +1,18 @@
 # nomod-cli
 
+[![GitHub Release](https://img.shields.io/github/v/release/piyook/nomod-cli)](https://github.com/piyook/nomod-cli/releases)
+[![checks workflow](https://github.com/piyook/nomod-cli/actions/workflows/checks.yaml/badge.svg)](https://github.com/piyook/nomod-cli/actions/workflows/checks.yaml)
+[![npm version](https://img.shields.io/npm/v/nomod-cli)](https://www.npmjs.com/package/nomod-cli)
+[![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
+[![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)](package.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Free disk space by deleting the `node_modules` folders you don't need. Use it yourself in a terminal, or let your AI agent do it for you.
 
 - **By hand:** a checklist of every `node_modules` on your machine, biggest first, with what's safe to delete already ticked.
 - **For agents:** one command does the work an agent would otherwise piece together from hundreds of `find`, `du` and `git` calls, and hands back a short JSON summary. That saves tool calls and tokens. Ask your agent to "free up some disk space" and it can scan, show you the list, and delete just what you agree to.
 
-No dependencies. Needs Node 20 or newer. Works on Windows, macOS and Linux.
+No dependencies. Needs Node 22 or newer. Works on Windows, macOS and Linux.
 
 ![nomod listing node_modules folders with their size, last use, git status and project name, and the free space you'd have after deleting the checked ones](docs/screenshot.svg)
 
