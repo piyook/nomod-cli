@@ -1,14 +1,20 @@
 {
   "name": "nomod-cli",
   "version": "1.0.0",
-  "description": "Find node_modules folders, see how much disk space they take, and delete the ones you don't need.",
+  "description": "Find node_modules folders, see how much disk space they take, and delete the ones you don't need: by hand, or driven by an AI agent.",
   "keywords": [
     "node_modules",
     "cleanup",
     "disk-space",
     "delete",
     "cli",
-    "npkill"
+    "npkill",
+    "developer-tools",
+    "ai-agents",
+    "llms-txt",
+    "claude-code",
+    "json",
+    "zero-dependencies"
   ],
   "repository": {
     "type": "git",
